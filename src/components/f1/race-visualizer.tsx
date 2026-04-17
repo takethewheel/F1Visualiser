@@ -364,15 +364,20 @@ export default function RaceVisualizer() {
           const driverId = result.Driver.driverId;
           const code = result.Driver.code || `${result.Driver.givenName[0]}${result.Driver.familyName.substring(0, 3)}`.toUpperCase();
           const teamId = result.Constructor.constructorId;
+          const gridRaw = parseInt(result.grid);
+          // Grid position 0 means DNS (did not start) — keep it as 0, don't fallback
+          const gridPosition = isNaN(gridRaw) ? 0 : gridRaw;
+          const status = result.status || "";
+          const isDNS = gridPosition === 0 || status.toLowerCase().includes("dns");
           return {
             driverId, code,
             firstName: result.Driver.givenName,
             lastName: result.Driver.familyName,
             teamName: result.Constructor.name, teamId,
-            gridPosition: parseInt(result.grid) || index + 1,
+            gridPosition,
             finishingPosition: parseInt(result.position) || index + 1,
-            status: result.status,
-            finished: result.status === "Finished" || result.status.startsWith("+"),
+            status: isDNS ? "DNS" : status,
+            finished: !isDNS && (status === "Finished" || status.startsWith("+")),
             lapsCompleted: parseInt(result.laps) || 0,
             laps: [], cumulativeTimes: [], totalRaceTime: 0,
             gapToFront: result.Time?.time || "",
@@ -437,13 +442,18 @@ export default function RaceVisualizer() {
         setRaceData(processed);
 
         // Update driver states with loaded status
-        const loaded: DriverPlaybackState[] = drivers.map((d) => ({
-          driverId: d.driverId, code: d.code, teamName: d.teamName, color: d.color,
-          position: d.gridPosition, lap: 0, trackProgress: 0, x: 0, y: 0,
-          finished: false,
-          status: d.cumulativeTimes.length === 0 ? "No lap data" : "Ready",
-          gapToLeader: "", gridPosition: d.gridPosition,
-        }));
+        const loaded: DriverPlaybackState[] = drivers.map((d) => {
+          // Keep DNS status for drivers who never started
+          const isDNSDriver = d.status === "DNS" || d.gridPosition === 0;
+          return {
+            driverId: d.driverId, code: d.code, teamName: d.teamName, color: d.color,
+            position: isDNSDriver ? 0 : d.gridPosition,
+            lap: 0, trackProgress: 0, x: 0, y: 0,
+            finished: false,
+            status: isDNSDriver ? "DNS" : (d.cumulativeTimes.length === 0 ? "No lap data" : "Ready"),
+            gapToLeader: "", gridPosition: d.gridPosition,
+          };
+        });
         setDriverStates(loaded);
         setCurrentLap(0);
 

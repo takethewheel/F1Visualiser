@@ -10,14 +10,36 @@ interface LeaderboardProps {
   raceName: string;
 }
 
+function isDNS(driver: DriverPlaybackState): boolean {
+  if (driver.lap === 0 && driver.trackProgress === 0) {
+    const s = driver.status.toLowerCase();
+    if (
+      s.includes("dns") ||
+      s.includes("did not start") ||
+      s.includes("withheld") ||
+      s.includes("107%") ||
+      s.includes("no lap data") ||
+      s.includes("loading")
+    ) {
+      return true;
+    }
+    if (driver.gridPosition === 0) return true;
+  }
+  return false;
+}
+
 export default function Leaderboard({
   drivers,
   currentLap,
   totalLaps,
   raceName,
 }: LeaderboardProps) {
-  // Sort drivers by position
-  const sortedDrivers = [...drivers].sort(
+  // Separate active and DNS drivers
+  const activeDrivers = drivers.filter((d) => !isDNS(d));
+  const dnsDrivers = drivers.filter((d) => isDNS(d));
+
+  // Sort active drivers by position
+  const sortedActive = [...activeDrivers].sort(
     (a, b) => a.position - b.position
   );
 
@@ -41,7 +63,7 @@ export default function Leaderboard({
 
       {/* Driver list */}
       <div className="flex-1 overflow-y-auto custom-scrollbar">
-        {sortedDrivers.map((driver) => (
+        {sortedActive.map((driver) => (
           <div
             key={driver.driverId}
             className={`
@@ -49,7 +71,7 @@ export default function Leaderboard({
               items-center text-xs border-b border-zinc-800/30
               hover:bg-zinc-800/40 transition-colors
               ${driver.position <= 3 ? "bg-zinc-800/20" : ""}
-              ${driver.finished ? "opacity-80" : ""}
+              ${driver.finished ? "opacity-70" : ""}
             `}
           >
             {/* Position */}
@@ -97,7 +119,40 @@ export default function Leaderboard({
           </div>
         ))}
 
-        {sortedDrivers.length === 0 && (
+        {/* DNS / DNF drivers section */}
+        {dnsDrivers.length > 0 && (
+          <>
+            <div className="px-4 py-1 text-[9px] text-zinc-600 uppercase tracking-wider border-t border-zinc-700/50 bg-zinc-900/20">
+              Did Not Start
+            </div>
+            {dnsDrivers.map((driver) => (
+              <div
+                key={driver.driverId}
+                className="grid grid-cols-[28px_1fr_70px_50px] gap-1 px-4 py-1.5 items-center text-xs border-b border-zinc-800/20 opacity-40"
+              >
+                <span className="text-zinc-600 text-center text-[10px]">—</span>
+                <div className="flex items-center gap-2 min-w-0">
+                  <div
+                    className="w-1.5 h-6 rounded-full flex-shrink-0 opacity-50"
+                    style={{ backgroundColor: driver.color }}
+                  />
+                  <div className="min-w-0">
+                    <div className="font-semibold text-zinc-500 truncate text-[11px]">
+                      {driver.code}
+                    </div>
+                    <div className="text-[9px] text-zinc-700 truncate">
+                      DNS
+                    </div>
+                  </div>
+                </div>
+                <span className="text-zinc-700 text-[10px]">DNS</span>
+                <span className="text-zinc-700 text-[10px] text-right">—</span>
+              </div>
+            ))}
+          </>
+        )}
+
+        {sortedActive.length === 0 && dnsDrivers.length === 0 && (
           <div className="flex items-center justify-center h-32 text-zinc-600 text-sm">
             No driver data
           </div>
