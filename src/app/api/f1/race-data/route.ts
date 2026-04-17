@@ -19,7 +19,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    // 1. Fetch race results
+    // 1. Fetch race results (single fast request)
     const resultsRes = await fetch(
       `${ERGAST_BASE}/${year}/${round}/results.json?limit=30`
     );
@@ -34,19 +34,7 @@ export async function GET(request: NextRequest) {
     const results = raceInfo.Results || [];
     const circuitId = raceInfo.Circuit.circuitId;
 
-    // 2. Fetch lap data for each driver in parallel
-    const lapPromises = results.map(
-      (result: any) =>
-        fetch(
-          `${ERGAST_BASE}/${year}/${round}/drivers/${result.Driver.driverId}/laps.json?limit=100`
-        )
-          .then((r) => r.json())
-          .then((d) => d.MRData.RaceTable.Races?.[0]?.Laps || [])
-          .catch(() => [])
-    );
-    const allLaps = await Promise.all(lapPromises);
-
-    // 3. Fetch circuit GeoJSON
+    // 2. Fetch circuit GeoJSON (single fast request)
     const f1CircuitsId = ERGAST_TO_F1CIRCUITS[circuitId];
     let circuitGeoJSON = null;
     if (f1CircuitsId) {
@@ -79,6 +67,11 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    // NOTE: Lap data is NOT fetched here anymore.
+    // The client fetches each driver's laps individually via /api/f1/driver-laps
+    // This avoids Vercel serverless function timeouts (10s limit on free tier)
+    // when making 20+ parallel external API calls.
+
     return NextResponse.json({
       raceInfo: {
         raceName: raceInfo.raceName,
@@ -90,7 +83,6 @@ export async function GET(request: NextRequest) {
         round: parseInt(round),
       },
       results,
-      laps: allLaps,
       circuitGeoJSON,
       f1CircuitsId,
     });

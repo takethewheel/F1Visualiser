@@ -222,6 +222,7 @@ export default function RaceVisualizer() {
   // ============================================================
   useEffect(() => {
     let rafId: number;
+    let lastRender = 0;
 
     function tick(ts: number) {
       if (!playingRef.current || !raceDataRef.current) {
@@ -238,17 +239,23 @@ export default function RaceVisualizer() {
 
       if (newTime >= maxTime) {
         timeRef.current = maxTime;
+        const finalStates = computeStates(maxTime);
         setCurrentTime(maxTime);
-        setDriverStates(computeStates(maxTime));
+        setDriverStates(finalStates);
         setCurrentLap(raceDataRef.current!.totalLaps);
         setIsPlaying(false);
         setIsFinished(true);
       } else {
         timeRef.current = newTime;
-        setCurrentTime(newTime);
-        setDriverStates(computeStates(newTime));
-        const leaderLap = Math.max(...computeStates(newTime).map(d => d.trackProgress));
-        setCurrentLap(Math.floor(leaderLap));
+        // Throttle React state updates to ~30fps for better performance
+        if (ts - lastRender >= 33) {
+          lastRender = ts;
+          const states = computeStates(newTime);
+          setCurrentTime(newTime);
+          setDriverStates(states);
+          const leaderLap = states.length > 0 ? Math.max(...states.map(d => d.trackProgress)) : 0;
+          setCurrentLap(Math.floor(leaderLap));
+        }
       }
 
       rafId = requestAnimationFrame(tick);
@@ -313,6 +320,9 @@ export default function RaceVisualizer() {
 
   // ============================================================
   // Fetch race data when year+round selected
+  // Strategy: Fetch results + circuit from API route (fast, 2 requests),
+  // then fetch each driver's laps IN PARALLEL from the client side.
+  // This avoids Vercel serverless function timeouts.
   // ============================================================
   useEffect(() => {
     if (!selectedYear || !selectedRound) return;
@@ -328,36 +338,70 @@ export default function RaceVisualizer() {
       setIsFinished(false);
 
       try {
+        // Step 1: Fetch race results + circuit GeoJSON (fast, 2 external requests)
         const res = await fetch(`/api/f1/race-data?year=${selectedYear}&round=${selectedRound}`);
         const data = await res.json();
         if (cancelled) return;
 
         if (data.error) {
-        setError(`This race doesn't have results yet. Try another year or race.`);
-        setIsLoadingRace(false);
-        return;
-      }
-      if (!data.results || data.results.length === 0) {
-        setError(`No results found for this race. It may not have taken place yet.`);
-        setIsLoadingRace(false);
-        return;
-      }
+          setError(`This race doesn't have results yet. Try another year or race.`);
+          setIsLoadingRace(false);
+          return;
+        }
+        if (!data.results || data.results.length === 0) {
+          setError(`No results found for this race. It may not have taken place yet.`);
+          setIsLoadingRace(false);
+          return;
+        }
 
-        const results = data.results || [];
-        const allLaps = data.laps || [];
+        const results = data.results;
 
-        if (results.length === 0) { setError("No results found for this race"); setIsLoadingRace(false); return; }
+        // Set circuit GeoJSON right away so track renders while laps load
+        setCircuitGeoJSON(data.circuitGeoJSON || null);
 
-        const drivers: DriverLapData[] = results.map((result: any, index: number) => {
+        // Step 2: Build skeleton driver data (no lap times yet)
+        const skeletonDrivers: DriverLapData[] = results.map((result: any, index: number) => {
           const driverId = result.Driver.driverId;
           const code = result.Driver.code || `${result.Driver.givenName[0]}${result.Driver.familyName.substring(0, 3)}`.toUpperCase();
           const teamId = result.Constructor.constructorId;
-          const gridPosition = parseInt(result.grid) || index + 1;
-          const finishingPosition = parseInt(result.position) || index + 1;
-          const status = result.status;
-          const finished = status === "Finished" || status.startsWith("+");
-          const lapsCompleted = parseInt(result.laps) || 0;
+          return {
+            driverId, code,
+            firstName: result.Driver.givenName,
+            lastName: result.Driver.familyName,
+            teamName: result.Constructor.name, teamId,
+            gridPosition: parseInt(result.grid) || index + 1,
+            finishingPosition: parseInt(result.position) || index + 1,
+            status: result.status,
+            finished: result.status === "Finished" || result.status.startsWith("+"),
+            lapsCompleted: parseInt(result.laps) || 0,
+            laps: [], cumulativeTimes: [], totalRaceTime: 0,
+            gapToFront: result.Time?.time || "",
+            color: getTeamColor(teamId),
+          };
+        });
 
+        // Set initial state so the UI shows the track + driver names
+        const initial: DriverPlaybackState[] = skeletonDrivers.map((d) => ({
+          driverId: d.driverId, code: d.code, teamName: d.teamName, color: d.color,
+          position: d.gridPosition, lap: 0, trackProgress: 0, x: 0, y: 0,
+          finished: false, status: "Loading laps...", gapToLeader: "", gridPosition: d.gridPosition,
+        }));
+        setDriverStates(initial);
+
+        // Step 3: Fetch lap data for EACH driver in parallel from the client.
+        // Each request hits our thin proxy which only makes 1 external API call,
+        // so no Vercel serverless function timeout issues.
+        const lapPromises = skeletonDrivers.map((driver) =>
+          fetch(`/api/f1/driver-laps?year=${selectedYear}&round=${selectedRound}&driverId=${driver.driverId}`)
+            .then((r) => r.json())
+            .then((d) => d.laps || [])
+            .catch(() => [])
+        );
+        const allLaps = await Promise.all(lapPromises);
+        if (cancelled) return;
+
+        // Step 4: Process lap data into driver objects
+        const drivers: DriverLapData[] = skeletonDrivers.map((driver, index) => {
           const lapData = allLaps[index] || [];
           const laps: number[] = lapData.map((lap: any) => {
             const timing = lap.Timings?.[0];
@@ -370,15 +414,8 @@ export default function RaceVisualizer() {
           const totalRaceTime = cumulativeTimes.length > 0 ? cumulativeTimes[cumulativeTimes.length - 1] : 0;
 
           return {
-            driverId, code,
-            firstName: result.Driver.givenName,
-            lastName: result.Driver.familyName,
-            teamName: result.Constructor.name, teamId,
-            gridPosition, finishingPosition, status,
+            ...driver,
             laps, cumulativeTimes, totalRaceTime,
-            finished, lapsCompleted,
-            gapToFront: result.Time?.time || "",
-            color: getTeamColor(teamId),
           };
         });
 
@@ -398,15 +435,16 @@ export default function RaceVisualizer() {
         };
 
         setRaceData(processed);
-        setCircuitGeoJSON(data.circuitGeoJSON || null);
 
-        // Initial driver states
-        const initial: DriverPlaybackState[] = drivers.map((d) => ({
+        // Update driver states with loaded status
+        const loaded: DriverPlaybackState[] = drivers.map((d) => ({
           driverId: d.driverId, code: d.code, teamName: d.teamName, color: d.color,
           position: d.gridPosition, lap: 0, trackProgress: 0, x: 0, y: 0,
-          finished: false, status: "Starting", gapToLeader: "", gridPosition: d.gridPosition,
+          finished: false,
+          status: d.cumulativeTimes.length === 0 ? "No lap data" : "Ready",
+          gapToLeader: "", gridPosition: d.gridPosition,
         }));
-        setDriverStates(initial);
+        setDriverStates(loaded);
         setCurrentLap(0);
 
       } catch (err: any) { setError(err.message || "Failed to load race data"); }
