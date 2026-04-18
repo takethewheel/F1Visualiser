@@ -18,7 +18,7 @@ interface RaceSelectorProps {
   selectedYear: number | null;
   selectedRound: number | null;
   availableYears: number[];
-  races: { round: number; raceName: string; circuitName: string }[];
+  races: { round: number; raceName: string; circuitName: string; hasTrack: boolean; hasResults: boolean }[];
   isLoading: boolean;
 }
 
@@ -75,15 +75,25 @@ export default function RaceSelector({
             <SelectValue placeholder="Select race" />
           </SelectTrigger>
           <SelectContent className="bg-zinc-900 border-zinc-700 max-h-[200px]">
-            {races.map((race) => (
-              <SelectItem
-                key={race.round}
-                value={race.round.toString()}
-                className="text-zinc-300 text-xs focus:bg-zinc-800 focus:text-zinc-100"
-              >
-                R{race.round} — {race.raceName}
-              </SelectItem>
-            ))}
+            {races.map((race) => {
+              const available = race.hasTrack && race.hasResults;
+              return (
+                <SelectItem
+                  key={race.round}
+                  value={race.round.toString()}
+                  disabled={!available}
+                  className={`text-xs focus:bg-zinc-800 focus:text-zinc-100 ${
+                    available
+                      ? "text-zinc-300"
+                      : "text-zinc-600 pointer-events-none"
+                  }`}
+                >
+                  R{race.round} — {race.raceName}
+                  {!race.hasResults && " \u{1F4C5}"}
+                  {!race.hasTrack && race.hasResults && " \u{1F5FA}"}
+                </SelectItem>
+              );
+            })}
           </SelectContent>
         </Select>
       </div>

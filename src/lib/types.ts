@@ -140,6 +140,7 @@ export interface DriverLapData {
   lapsCompleted: number;
   gapToFront?: string; // gap string from results
   color: string; // team color
+  isDNS: boolean; // set once during skeleton creation, authoritative DNS flag
 }
 
 /** Full processed race data */
@@ -177,6 +178,9 @@ export interface DriverPlaybackState {
   status: string;
   gapToLeader: string;
   gridPosition: number;
+  currentLapTime: number | null; // seconds elapsed in current lap (null if not on a lap)
+  previousLapTime: number | null; // last completed lap time in seconds (null if none)
+  fastestLapTime: number | null; // fastest completed lap time in seconds (null if none)
 }
 
 /** Race playback state */
@@ -193,4 +197,13 @@ export interface RacePlaybackState {
 export interface SpeedOption {
   label: string;
   value: number;
+}
+
+/** Race event for the timeline (retirements, fastest laps, etc.) */
+export interface RaceEvent {
+  type: "retirement" | "fastest_lap" | "pit_stop";
+  time: number; // race time in seconds when the event occurred
+  driverCode: string;
+  description: string;
+  lap?: number;
 }

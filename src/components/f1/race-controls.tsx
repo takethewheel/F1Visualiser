@@ -17,7 +17,10 @@ import {
   SkipForward,
   RotateCcw,
   Gauge,
+  Car,
+  Circle,
 } from "lucide-react";
+import { RaceEvent } from "@/lib/types";
 
 const SPEED_OPTIONS = [
   { label: "0.5x", value: 0.5 },
@@ -37,10 +40,26 @@ interface RaceControlsProps {
   maxTime: number;
   currentLap: number;
   totalLaps: number;
+  showCars: boolean;
+  raceEvents: RaceEvent[];
   onPlayPause: () => void;
   onSpeedChange: (speed: number) => void;
   onSeek: (time: number) => void;
   onReset: () => void;
+  onToggleCars: () => void;
+}
+
+function getEventIcon(type: RaceEvent["type"]): { symbol: string; color: string } {
+  switch (type) {
+    case "retirement":
+      return { symbol: "✕", color: "#ef4444" };
+    case "fastest_lap":
+      return { symbol: "★", color: "#a855f7" };
+    case "pit_stop":
+      return { symbol: "⊞", color: "#f59e0b" };
+    default:
+      return { symbol: "•", color: "#71717a" };
+  }
 }
 
 export default function RaceControls({
@@ -50,10 +69,13 @@ export default function RaceControls({
   maxTime,
   currentLap,
   totalLaps,
+  showCars,
+  raceEvents,
   onPlayPause,
   onSpeedChange,
   onSeek,
   onReset,
+  onToggleCars,
 }: RaceControlsProps) {
   const progress = maxTime > 0 ? (currentTime / maxTime) * 100 : 0;
 
@@ -67,17 +89,48 @@ export default function RaceControls({
 
   return (
     <div className="bg-zinc-950 rounded-xl border border-zinc-800 px-4 py-3">
-      {/* Progress bar */}
+      {/* Progress bar + event markers */}
       <div className="mb-3">
-        <Slider
-          value={[progress]}
-          max={100}
-          step={0.1}
-          onValueChange={(value) => {
-            onSeek((value[0] / 100) * maxTime);
-          }}
-          className="cursor-pointer"
-        />
+        <div className="relative">
+          <Slider
+            value={[progress]}
+            max={100}
+            step={0.1}
+            onValueChange={(value) => {
+              onSeek((value[0] / 100) * maxTime);
+            }}
+            className="cursor-pointer"
+          />
+          {/* Race event markers overlaid on the progress bar */}
+          {raceEvents.length > 0 && (
+            <div className="absolute top-1/2 left-0 right-0 -translate-y-1/2 pointer-events-none" style={{ height: "20px" }}>
+              {raceEvents.map((event, i) => {
+                const pct = maxTime > 0 ? (event.time / maxTime) * 100 : 0;
+                if (pct < 0 || pct > 100) return null;
+                const { symbol, color } = getEventIcon(event.type);
+                return (
+                  <button
+                    key={`${event.type}-${event.driverCode}-${i}`}
+                    className="absolute pointer-events-auto -translate-x-1/2 -translate-y-1/2 top-1/2 cursor-pointer hover:scale-150 transition-transform"
+                    style={{ left: `${pct}%` }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSeek(event.time);
+                    }}
+                    title={event.description}
+                  >
+                    <span
+                      className="text-[10px] leading-none drop-shadow-md"
+                      style={{ color }}
+                    >
+                      {symbol}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
         <div className="flex justify-between mt-1 text-[10px] text-zinc-600 tabular-nums">
           <span>{formatRaceTime(currentTime)}</span>
           <span>
@@ -85,6 +138,17 @@ export default function RaceControls({
           </span>
           <span>{formatRaceTime(maxTime)}</span>
         </div>
+        {/* Event legend */}
+        {raceEvents.length > 0 && (
+          <div className="flex items-center gap-3 mt-1 text-[9px] text-zinc-600">
+            <span className="flex items-center gap-1">
+              <span style={{ color: "#ef4444" }}>✕</span> DNF
+            </span>
+            <span className="flex items-center gap-1">
+              <span style={{ color: "#a855f7" }}>★</span> Fastest Lap
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Controls row */}
@@ -96,7 +160,7 @@ export default function RaceControls({
             size="icon"
             className="h-8 w-8 text-zinc-400 hover:text-zinc-100"
             onClick={onReset}
-            title="Reset"
+            title="Reset (R)"
           >
             <RotateCcw className="h-4 w-4" />
           </Button>
@@ -105,7 +169,7 @@ export default function RaceControls({
             size="icon"
             className="h-8 w-8 text-zinc-400 hover:text-zinc-100"
             onClick={() => onSeek(Math.max(0, currentTime - 30))}
-            title="Back 30s"
+            title="Back 30s (←)"
           >
             <SkipBack className="h-4 w-4" />
           </Button>
@@ -118,6 +182,7 @@ export default function RaceControls({
                 : "border-zinc-600 text-zinc-300 hover:text-zinc-100 hover:border-zinc-400"
             }`}
             onClick={onPlayPause}
+            title="Play/Pause (Space)"
           >
             {isPlaying ? (
               <Pause className="h-5 w-5" />
@@ -130,9 +195,31 @@ export default function RaceControls({
             size="icon"
             className="h-8 w-8 text-zinc-400 hover:text-zinc-100"
             onClick={() => onSeek(Math.min(maxTime, currentTime + 30))}
-            title="Forward 30s"
+            title="Forward 30s (→)"
           >
             <SkipForward className="h-4 w-4" />
+          </Button>
+        </div>
+
+        {/* Center: Car/Dot toggle */}
+        <div className="flex items-center gap-1">
+          <Button
+            variant={showCars ? "default" : "ghost"}
+            size="icon"
+            className={`h-8 w-8 ${showCars ? "bg-red-600 hover:bg-red-700 text-white" : "text-zinc-400 hover:text-zinc-100"}`}
+            onClick={onToggleCars}
+            title={showCars ? "Show dots" : "Show F1 cars"}
+          >
+            <Car className="h-4 w-4" />
+          </Button>
+          <Button
+            variant={!showCars ? "default" : "ghost"}
+            size="icon"
+            className={`h-8 w-8 ${!showCars ? "bg-red-600 hover:bg-red-700 text-white" : "text-zinc-400 hover:text-zinc-100"}`}
+            onClick={onToggleCars}
+            title={showCars ? "Show dots" : "Show F1 cars"}
+          >
+            <Circle className="h-3 w-3" />
           </Button>
         </div>
 

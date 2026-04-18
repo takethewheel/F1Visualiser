@@ -11,19 +11,28 @@ interface LeaderboardProps {
 }
 
 function isDNS(driver: DriverPlaybackState): boolean {
-  if (driver.lap === 0 && driver.trackProgress === 0) {
-    const s = driver.status.toLowerCase();
+  return driver.status.toLowerCase() === "dns";
+}
+
+function isDNF(driver: DriverPlaybackState): boolean {
+  const s = driver.status.toLowerCase();
+  // computeStates is the single source of truth; it sets status to exactly "DNF"
+  // for retired drivers and "DNS" for non-starters
+  if (s === "dnf") return true;
+  // Also catch raw Ergast retirement statuses that might leak through
+  // (Engine, Accident, Gearbox, Retired, etc.)
+  if (driver.lap > 0 || driver.trackProgress > 0) {
     if (
-      s.includes("dns") ||
-      s.includes("did not start") ||
-      s.includes("withheld") ||
-      s.includes("107%") ||
-      s.includes("no lap data") ||
-      s.includes("loading")
+      s !== "finished" &&
+      s !== "dns" &&
+      !s.startsWith("+") &&
+      !s.includes("ready") &&
+      !s.includes("loading") &&
+      !s.includes("no lap data") &&
+      s.length > 0
     ) {
       return true;
     }
-    if (driver.gridPosition === 0) return true;
   }
   return false;
 }
@@ -34,8 +43,9 @@ export default function Leaderboard({
   totalLaps,
   raceName,
 }: LeaderboardProps) {
-  // Separate active and DNS drivers
-  const activeDrivers = drivers.filter((d) => !isDNS(d));
+  // Separate active, DNF, and DNS drivers
+  const activeDrivers = drivers.filter((d) => !isDNS(d) && !isDNF(d));
+  const dnfDrivers = drivers.filter((d) => isDNF(d));
   const dnsDrivers = drivers.filter((d) => isDNS(d));
 
   // Sort active drivers by position
@@ -119,7 +129,40 @@ export default function Leaderboard({
           </div>
         ))}
 
-        {/* DNS / DNF drivers section */}
+        {/* DNF drivers section */}
+        {dnfDrivers.length > 0 && (
+          <>
+            <div className="px-4 py-1 text-[9px] text-red-500/70 uppercase tracking-wider border-t border-zinc-700/50 bg-zinc-900/20">
+              Retired (DNF)
+            </div>
+            {dnfDrivers.map((driver) => (
+              <div
+                key={driver.driverId}
+                className="grid grid-cols-[28px_1fr_70px_50px] gap-1 px-4 py-1.5 items-center text-xs border-b border-zinc-800/20 opacity-50"
+              >
+                <span className="text-zinc-600 text-center text-[10px]">—</span>
+                <div className="flex items-center gap-2 min-w-0">
+                  <div
+                    className="w-1.5 h-6 rounded-full flex-shrink-0 opacity-50"
+                    style={{ backgroundColor: driver.color }}
+                  />
+                  <div className="min-w-0">
+                    <div className="font-semibold text-zinc-500 truncate text-[11px]">
+                      {driver.code}
+                    </div>
+                    <div className="text-[9px] text-red-600/60 truncate">
+                      DNF
+                    </div>
+                  </div>
+                </div>
+                <span className="text-red-600/50 text-[10px]">DNF</span>
+                <span className="text-zinc-700 text-[10px] text-right">{driver.lap}</span>
+              </div>
+            ))}
+          </>
+        )}
+
+        {/* DNS drivers section */}
         {dnsDrivers.length > 0 && (
           <>
             <div className="px-4 py-1 text-[9px] text-zinc-600 uppercase tracking-wider border-t border-zinc-700/50 bg-zinc-900/20">
@@ -152,7 +195,7 @@ export default function Leaderboard({
           </>
         )}
 
-        {sortedActive.length === 0 && dnsDrivers.length === 0 && (
+        {sortedActive.length === 0 && dnfDrivers.length === 0 && dnsDrivers.length === 0 && (
           <div className="flex items-center justify-center h-32 text-zinc-600 text-sm">
             No driver data
           </div>

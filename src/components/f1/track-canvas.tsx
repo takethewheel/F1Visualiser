@@ -12,32 +12,28 @@ interface TrackCanvasProps {
   totalLaps: number;
   currentLap: number;
   isPlaying: boolean;
+  showCars: boolean;
   onTrackReady?: (track: ProjectedTrack) => void;
 }
 
 interface SmoothedDriver extends DriverPlaybackState {
   x: number;
   y: number;
+  heading: number; // angle in degrees, 0 = pointing right
 }
 
 const LERP_FACTOR = 0.3;
 const LERP_FACTOR_PAUSED = 0.12;
 
-function isDNS(driver: DriverPlaybackState): boolean {
-  if (driver.lap === 0 && driver.trackProgress === 0) {
-    const s = driver.status.toLowerCase();
-    if (
-      s.includes("dns") ||
-      s.includes("did not start") ||
-      s.includes("withheld") ||
-      s.includes("107%") ||
-      s.includes("no lap data") ||
-      s.includes("loading")
-    ) {
-      return true;
-    }
-    if (driver.gridPosition === 0) return true;
-  }
+/** Returns true if driver should NOT appear on the track (DNS, DNF, or loading) */
+function isOffTrack(driver: DriverPlaybackState): boolean {
+  const s = driver.status.toLowerCase();
+  // DNS: never started the race
+  if (s === "dns") return true;
+  // DNF: retired / broken down during the race
+  if (s === "dnf") return true;
+  // Still loading or no data
+  if (s.includes("loading") || s.includes("no lap data")) return true;
   return false;
 }
 
@@ -47,6 +43,7 @@ export default function TrackCanvas({
   totalLaps,
   currentLap,
   isPlaying,
+  showCars,
   onTrackReady,
 }: TrackCanvasProps) {
   const svgRef = useRef<SVGSVGElement>(null);
@@ -72,21 +69,44 @@ export default function TrackCanvas({
     }
   }, [projectedTrack, onTrackReady]);
 
-  const startFinishPos = useMemo(() => {
-    if (!projectedTrack) return null;
-    return projectedTrack.points[0];
+  // Calculate start/finish line perpendicular to track direction
+  const startFinishLine = useMemo(() => {
+    if (!projectedTrack || projectedTrack.points.length < 2) return null;
+    const pts = projectedTrack.points;
+    const p0 = pts[0];
+    // Use the next point to determine track direction at start
+    const p1 = pts[1];
+    const dx = p1.x - p0.x;
+    const dy = p1.y - p0.y;
+    const len = Math.sqrt(dx * dx + dy * dy) || 1;
+    // Perpendicular direction (normal)
+    const nx = -dy / len;
+    const ny = dx / len;
+    const halfWidth = 11; // half the width of the start/finish line across the track
+    return {
+      x: p0.x,
+      y: p0.y,
+      x1: p0.x + nx * halfWidth,
+      y1: p0.y + ny * halfWidth,
+      x2: p0.x - nx * halfWidth,
+      y2: p0.y - ny * halfWidth,
+    };
   }, [projectedTrack]);
 
-  // Calculate raw (unsmoothed) driver positions, filtering DNS
+  // Calculate raw (unsmoothed) driver positions + heading, filtering DNS/DNF
   const rawDriverPositions = useMemo(() => {
     if (!projectedTrack) return [];
 
     return drivers
-      .filter((d) => !isDNS(d))
+      .filter((d) => !isOffTrack(d))
       .map((driver) => {
         const progress = driver.trackProgress % 1;
         const point = getPositionOnTrack(projectedTrack.points, progress);
-        return { driver, rawX: point.x, rawY: point.y };
+        // Calculate heading by sampling a point slightly ahead on the track
+        const aheadProgress = ((progress + 0.003) % 1 + 1) % 1;
+        const aheadPoint = getPositionOnTrack(projectedTrack.points, aheadProgress);
+        const heading = (Math.atan2(aheadPoint.y - point.y, aheadPoint.x - point.x) * 180) / Math.PI;
+        return { driver, rawX: point.x, rawY: point.y, heading };
       });
   }, [drivers, projectedTrack]);
 
@@ -95,7 +115,7 @@ export default function TrackCanvas({
     const factor = isPlaying ? LERP_FACTOR : LERP_FACTOR_PAUSED;
     const newCache = new Map<string, { x: number; y: number }>();
 
-    const result: SmoothedDriver[] = rawDriverPositions.map(({ driver, rawX, rawY }) => {
+    const result: SmoothedDriver[] = rawDriverPositions.map(({ driver, rawX, rawY, heading }) => {
       const prev = smoothCache.get(driver.driverId);
       let x: number;
       let y: number;
@@ -119,7 +139,7 @@ export default function TrackCanvas({
       }
 
       newCache.set(driver.driverId, { x, y });
-      return { ...driver, x, y };
+      return { ...driver, x, y, heading };
     });
 
     return result;
@@ -142,8 +162,8 @@ export default function TrackCanvas({
 
   // Group overlapping drivers to offset them stably
   const offsetDrivers = useMemo(() => {
-    const offset = 9;
-    const proximityThreshold = 20;
+    const offset = showCars ? 12 : 9;
+    const proximityThreshold = showCars ? 24 : 20;
 
     const sorted = [...smoothedDrivers].sort(
       (a, b) => b.trackProgress - a.trackProgress
@@ -193,7 +213,27 @@ export default function TrackCanvas({
     }
 
     return result;
-  }, [smoothedDrivers]);
+  }, [smoothedDrivers, showCars]);
+
+  // Find battling driver pairs (within ~3 seconds = ~0.033 of a lap)
+  const battles = useMemo(() => {
+    const battleThreshold = 0.033;
+    const pairs: [SmoothedDriver, SmoothedDriver][] = [];
+
+    for (let i = 0; i < offsetDrivers.length; i++) {
+      for (let j = i + 1; j < offsetDrivers.length; j++) {
+        const a = offsetDrivers[i];
+        const b = offsetDrivers[j];
+        const progDiff = Math.abs(a.trackProgress - b.trackProgress);
+        // Only count as battle if on the same lap (or very close lap)
+        const lapDiff = Math.abs(Math.floor(a.trackProgress) - Math.floor(b.trackProgress));
+        if (progDiff < battleThreshold && lapDiff === 0) {
+          pairs.push([a, b]);
+        }
+      }
+    }
+    return pairs;
+  }, [offsetDrivers]);
 
   if (!projectedTrack) {
     return (
@@ -214,6 +254,11 @@ export default function TrackCanvas({
         <div className="text-xs font-medium text-zinc-500 uppercase tracking-wider">
           Lap {currentLap} / {totalLaps}
         </div>
+        {battles.length > 0 && (
+          <div className="text-[10px] text-amber-500/80 mt-0.5">
+            {battles.length} Battle{battles.length !== 1 ? "s" : ""}
+          </div>
+        )}
       </div>
 
       <svg
@@ -238,36 +283,152 @@ export default function TrackCanvas({
         <path d={projectedTrack.pathD} fill="none" stroke="#3f3f46" strokeWidth="16" strokeLinecap="round" strokeLinejoin="round" />
         <path d={projectedTrack.pathD} fill="none" stroke="#52525b" strokeWidth="0.5" strokeDasharray="8 12" strokeLinecap="round" />
 
-        {startFinishPos && (
+        {startFinishLine && (
           <g>
-            <line x1={startFinishPos.x - 8} y1={startFinishPos.y - 8} x2={startFinishPos.x + 8} y2={startFinishPos.y + 8} stroke="#ef4444" strokeWidth="3" opacity="0.8" />
-            <line x1={startFinishPos.x - 8} y1={startFinishPos.y + 8} x2={startFinishPos.x + 8} y2={startFinishPos.y - 8} stroke="#ef4444" strokeWidth="3" opacity="0.8" />
+            {/* Start/finish line - perpendicular white line across track */}
+            <line
+              x1={startFinishLine.x1}
+              y1={startFinishLine.y1}
+              x2={startFinishLine.x2}
+              y2={startFinishLine.y2}
+              stroke="#ffffff"
+              strokeWidth="3"
+              opacity="0.9"
+              strokeLinecap="butt"
+            />
+            {/* Checkered pattern overlay */}
+            <line
+              x1={startFinishLine.x1}
+              y1={startFinishLine.y1}
+              x2={startFinishLine.x}
+              y2={startFinishLine.y}
+              stroke="#000000"
+              strokeWidth="3"
+              opacity="0.7"
+              strokeLinecap="butt"
+              strokeDasharray="2 2"
+            />
+            <line
+              x1={startFinishLine.x}
+              y1={startFinishLine.y}
+              x2={startFinishLine.x2}
+              y2={startFinishLine.y2}
+              stroke="#000000"
+              strokeWidth="3"
+              opacity="0.7"
+              strokeLinecap="butt"
+              strokeDasharray="2 2"
+              strokeDashoffset="2"
+            />
+            {/* S/F label */}
+            <text
+              x={startFinishLine.x}
+              y={startFinishLine.y - 14}
+              textAnchor="middle"
+              fill="#ffffff"
+              fontSize="8"
+              fontFamily="monospace"
+              fontWeight="bold"
+              opacity="0.8"
+            >
+              S/F
+            </text>
           </g>
         )}
 
-        {offsetDrivers.map((driver) => (
-          <g key={driver.driverId}>
-            <circle cx={driver.x} cy={driver.y} r="8" fill={driver.color} opacity="0.3" filter="url(#dotShadow)" />
-            <circle cx={driver.x} cy={driver.y} r="6" fill={driver.color} stroke="#09090b" strokeWidth="1.5" />
-            {driver.position <= 3 && (
-              <text x={driver.x} y={driver.y + 3} textAnchor="middle" fill="#fff" fontSize="7" fontFamily="monospace" fontWeight="bold">
-                {driver.position}
-              </text>
-            )}
-            <text
-              x={driver.x}
-              y={driver.y - 12}
-              textAnchor="middle"
-              fill={driver.color}
-              fontSize="9"
-              fontFamily="monospace"
-              fontWeight="bold"
-              style={{ textShadow: "0 1px 3px rgba(0,0,0,0.8)" }}
-            >
-              {driver.code}
-            </text>
-          </g>
+        {/* Battle highlight lines */}
+        {battles.map(([a, b], i) => (
+          <line
+            key={`battle-${i}`}
+            x1={a.x}
+            y1={a.y}
+            x2={b.x}
+            y2={b.y}
+            stroke="#f59e0b"
+            strokeWidth="1"
+            strokeDasharray="3 3"
+            opacity="0.35"
+          />
         ))}
+
+        {offsetDrivers.map((driver) =>
+          showCars ? (
+            <g key={driver.driverId} transform={`translate(${driver.x},${driver.y}) rotate(${driver.heading})`}>
+              {/* F1 car - top-down view, pointing right at 0 degrees */}
+              {/* Glow / shadow */}
+              <ellipse cx="0" cy="0" rx="9" ry="5" fill={driver.color} opacity="0.25" filter="url(#dotShadow)" />
+              {/* Main body */}
+              <path
+                d="M-8,-3 L-6,-4 L-2,-4.5 L3,-4.5 L6,-3.5 L8,-2 L8,2 L6,3.5 L3,4.5 L-2,4.5 L-6,4 L-8,3 Z"
+                fill={driver.color}
+                stroke="#09090b"
+                strokeWidth="0.8"
+              />
+              {/* Front wing */}
+              <path
+                d="M7,-4 L9,-5 L9,5 L7,4"
+                fill={driver.color}
+                stroke="#09090b"
+                strokeWidth="0.5"
+                opacity="0.9"
+              />
+              {/* Rear wing */}
+              <path
+                d="M-8,-4 L-9,-5 L-9,5 L-8,4"
+                fill={driver.color}
+                stroke="#09090b"
+                strokeWidth="0.5"
+                opacity="0.9"
+              />
+              {/* Cockpit */}
+              <ellipse cx="1" cy="0" rx="2.5" ry="2" fill="#18181b" stroke="#27272a" strokeWidth="0.3" />
+              {/* Helmet dot */}
+              <circle cx="2" cy="0" r="1.2" fill={driver.color} opacity="0.8" />
+              {/* Position number for top 3 */}
+              {driver.position <= 3 && (
+                <text x="0" y="1" textAnchor="middle" fill="#fff" fontSize="4" fontFamily="monospace" fontWeight="bold">
+                  {driver.position}
+                </text>
+              )}
+              {/* Driver code label - offset above car, counter-rotated so text stays readable */}
+              <text
+                x="0"
+                y={-9}
+                textAnchor="middle"
+                fill={driver.color}
+                fontSize="9"
+                fontFamily="monospace"
+                fontWeight="bold"
+                transform={`rotate(${-driver.heading})`}
+                style={{ textShadow: "0 1px 3px rgba(0,0,0,0.8)" }}
+              >
+                {driver.code}
+              </text>
+            </g>
+          ) : (
+            <g key={driver.driverId}>
+              <circle cx={driver.x} cy={driver.y} r="8" fill={driver.color} opacity="0.3" filter="url(#dotShadow)" />
+              <circle cx={driver.x} cy={driver.y} r="6" fill={driver.color} stroke="#09090b" strokeWidth="1.5" />
+              {driver.position <= 3 && (
+                <text x={driver.x} y={driver.y + 3} textAnchor="middle" fill="#fff" fontSize="7" fontFamily="monospace" fontWeight="bold">
+                  {driver.position}
+                </text>
+              )}
+              <text
+                x={driver.x}
+                y={driver.y - 12}
+                textAnchor="middle"
+                fill={driver.color}
+                fontSize="9"
+                fontFamily="monospace"
+                fontWeight="bold"
+                style={{ textShadow: "0 1px 3px rgba(0,0,0,0.8)" }}
+              >
+                {driver.code}
+              </text>
+            </g>
+          )
+        )}
       </svg>
     </div>
   );

@@ -5,9 +5,11 @@ import React, {
   useEffect,
   useRef,
   useCallback,
+  useMemo,
 } from "react";
 import TrackCanvas from "./track-canvas";
 import Leaderboard from "./leaderboard";
+import LapTimes from "./lap-times";
 import RaceControls from "./race-controls";
 import RaceSelector from "./race-selector";
 import { ProjectedTrack } from "@/lib/track-utils";
@@ -17,7 +19,7 @@ import {
   DriverLapData,
   DriverPlaybackState,
   CircuitGeoJSON,
-  ErgastRace,
+  RaceEvent,
 } from "@/lib/types";
 
 // ============================================================
@@ -71,9 +73,38 @@ function getPointOnTrack(
   };
 }
 
+/** Check if an Ergast status string indicates the driver did not start */
+function statusIsDNS(status: string): boolean {
+  const s = status.toLowerCase().trim();
+  return (
+    s.includes("dns") ||
+    s.includes("did not start") ||
+    s.includes("withheld") ||
+    s.includes("107%") ||
+    s.includes("not classified") ||
+    s.includes("excluded") ||
+    s.includes("did not qualify") ||
+    s.includes("failed to qualify") ||
+    s.includes("not restarted") ||
+    // Numeric status IDs from Ergast for DNS-type statuses:
+    // 40=Withheld, 131=Did not start, 132=Not classified, etc.
+    s === "40" ||
+    s === "131" ||
+    s === "132"
+  );
+}
+
+/** Check if an Ergast status string indicates the driver retired (DNF) but did start */
+function statusIsDNF(status: string): boolean {
+  const s = status.toLowerCase();
+  if (s === "finished" || s.startsWith("+") || statusIsDNS(status)) return false;
+  // Any other non-empty status that isn't Finished or +N Laps is a retirement
+  return s.length > 0 && s !== "dns";
+}
+
 function calcDriverPos(driver: DriverLapData, raceTime: number) {
   if (driver.cumulativeTimes.length === 0) {
-    return { lap: 0, lapProgress: 0, finished: false, totalProgress: 0 };
+    return { lap: 0, lapProgress: 0, finished: false, totalProgress: 0, currentLapElapsed: 0 };
   }
 
   const lastCum = driver.cumulativeTimes[driver.cumulativeTimes.length - 1];
@@ -85,6 +116,7 @@ function calcDriverPos(driver: DriverLapData, raceTime: number) {
       lapProgress: 0,
       finished: driverFinished,
       totalProgress: driver.cumulativeTimes.length,
+      currentLapElapsed: driverFinished ? 0 : (raceTime - lastCum),
     };
   }
 
@@ -99,12 +131,14 @@ function calcDriverPos(driver: DriverLapData, raceTime: number) {
   const lapDur = lapEnd - lapStart;
   const lapProg = lapDur > 0 ? (raceTime - lapStart) / lapDur : 0;
   const totalProg = lapIdx + Math.min(Math.max(lapProg, 0), 1);
+  const currentLapElapsed = raceTime - lapStart;
 
   return {
     lap: lapIdx + 1,
     lapProgress: Math.min(Math.max(lapProg, 0), 1),
     finished: false,
     totalProgress: totalProg,
+    currentLapElapsed,
   };
 }
 
@@ -113,7 +147,7 @@ function calcDriverPos(driver: DriverLapData, raceTime: number) {
 // ============================================================
 export default function RaceVisualizer() {
   const [availableYears, setAvailableYears] = useState<number[]>([]);
-  const [races, setRaces] = useState<{ round: number; raceName: string; circuitName: string }[]>([]);
+  const [races, setRaces] = useState<{ round: number; raceName: string; circuitName: string; hasTrack: boolean; hasResults: boolean }[]>([]);
   const [selectedYear, setSelectedYear] = useState<number | null>(null);
   const [selectedRound, setSelectedRound] = useState<number | null>(null);
   const [raceData, setRaceData] = useState<ProcessedRaceData | null>(null);
@@ -129,6 +163,8 @@ export default function RaceVisualizer() {
   const [driverStates, setDriverStates] = useState<DriverPlaybackState[]>([]);
   const [currentLap, setCurrentLap] = useState(0);
   const [isFinished, setIsFinished] = useState(false);
+  const [showCars, setShowCars] = useState(false);
+  const [sideTab, setSideTab] = useState<"standings" | "laptimes">("standings");
 
   // Refs for animation loop (avoid stale closures)
   const animRef = useRef<number>(0);
@@ -160,6 +196,40 @@ export default function RaceVisualizer() {
         x = pt.x; y = pt.y;
       }
 
+      // DNS: use the authoritative isDNS flag set during skeleton creation
+      const isDNSDriver = driver.isDNS;
+
+      // Detect DNF: driver has consumed all their lap data but didn't finish the race,
+      // OR their Ergast status is a known retirement reason (Engine, Accident, etc.)
+      const hasLaps = driver.cumulativeTimes.length > 0;
+      const lastCumTime = hasLaps ? driver.cumulativeTimes[driver.cumulativeTimes.length - 1] : 0;
+      const lapDataExhausted = hasLaps && raceTime >= lastCumTime && !driver.finished;
+      const ergastStatusIsDNF = statusIsDNF(driver.status) && !driver.finished;
+      // A driver is DNF if their lap data has been exhausted, OR if they have a DNF-type
+      // Ergast status and enough time has passed that they've at least started racing
+      // (but NOT if they are DNS — DNS takes priority)
+      const isDNFDriver = !isDNSDriver && (lapDataExhausted || (ergastStatusIsDNF && raceTime > 0));
+
+      let status: string;
+      if (isDNSDriver) {
+        status = "DNS";
+      } else if (isDNFDriver) {
+        status = "DNF";
+      } else if (pos.finished) {
+        status = "Finished";
+      } else {
+        status = driver.status;
+      }
+
+      // Calculate lap times
+      // Current: elapsed time in the current lap
+      const currentLapTime = (!pos.finished && pos.lap > 0) ? pos.currentLapElapsed : null;
+      // Previous: the last fully completed lap
+      const completedLaps = pos.lap > 0 ? pos.lap - 1 : 0;
+      const previousLapTime = completedLaps > 0 ? driver.laps[completedLaps - 1] : null;
+      // Fastest: minimum of all completed laps
+      const fastestLapTime = completedLaps > 0 ? Math.min(...driver.laps.slice(0, completedLaps)) : null;
+
       return {
         driverId: driver.driverId,
         code: driver.code,
@@ -170,9 +240,12 @@ export default function RaceVisualizer() {
         trackProgress: pos.totalProgress,
         x, y,
         finished: pos.finished,
-        status: pos.finished ? "Finished" : driver.status,
+        status,
         gapToLeader: "",
         gridPosition: driver.gridPosition,
+        currentLapTime,
+        previousLapTime,
+        fastestLapTime,
       };
     });
 
@@ -302,14 +375,18 @@ export default function RaceVisualizer() {
         const data = await res.json();
         if (cancelled) return;
         if (data.races) {
-          const list = data.races.map((r: ErgastRace) => ({
+          const list = data.races.map((r: any) => ({
             round: parseInt(r.round),
             raceName: r.raceName,
             circuitName: r.Circuit.circuitName,
+            hasTrack: r.hasTrack ?? false,
+            hasResults: r.hasResults ?? false,
           }));
           setRaces(list);
-          // Auto-select a random race
-          const pick = list[Math.floor(Math.random() * list.length)];
+          // Auto-select a random race that has both track and results available
+          const available = list.filter((r: any) => r.hasTrack && r.hasResults);
+          const pool = available.length > 0 ? available : list;
+          const pick = pool[Math.floor(Math.random() * pool.length)];
           if (pick) setSelectedRound(pick.round);
         }
       } catch { console.error("Failed to load races"); }
@@ -367,8 +444,12 @@ export default function RaceVisualizer() {
           const gridRaw = parseInt(result.grid);
           // Grid position 0 means DNS (did not start) — keep it as 0, don't fallback
           const gridPosition = isNaN(gridRaw) ? 0 : gridRaw;
-          const status = result.status || "";
-          const isDNS = gridPosition === 0 || status.toLowerCase().includes("dns");
+          const ergastStatus = result.status || "";
+          const lapsCompletedRaw = parseInt(result.laps) || 0;
+          // DNS detection: grid=0, DNS-type status, OR 0 laps completed with no finish
+          // This covers all edge cases including drivers who qualified but couldn't start
+          const isDNSDriver = gridPosition === 0 || statusIsDNS(ergastStatus) ||
+            (lapsCompletedRaw === 0 && !ergastStatus.startsWith("+") && ergastStatus !== "Finished");
           return {
             driverId, code,
             firstName: result.Driver.givenName,
@@ -376,12 +457,13 @@ export default function RaceVisualizer() {
             teamName: result.Constructor.name, teamId,
             gridPosition,
             finishingPosition: parseInt(result.position) || index + 1,
-            status: isDNS ? "DNS" : status,
-            finished: !isDNS && (status === "Finished" || status.startsWith("+")),
-            lapsCompleted: parseInt(result.laps) || 0,
+            status: isDNSDriver ? "DNS" : ergastStatus,
+            finished: !isDNSDriver && (ergastStatus === "Finished" || ergastStatus.startsWith("+")),
+            lapsCompleted: lapsCompletedRaw,
             laps: [], cumulativeTimes: [], totalRaceTime: 0,
             gapToFront: result.Time?.time || "",
             color: getTeamColor(teamId),
+            isDNS: isDNSDriver,
           };
         });
 
@@ -390,6 +472,7 @@ export default function RaceVisualizer() {
           driverId: d.driverId, code: d.code, teamName: d.teamName, color: d.color,
           position: d.gridPosition, lap: 0, trackProgress: 0, x: 0, y: 0,
           finished: false, status: "Loading laps...", gapToLeader: "", gridPosition: d.gridPosition,
+          currentLapTime: null, previousLapTime: null, fastestLapTime: null,
         }));
         setDriverStates(initial);
 
@@ -418,9 +501,17 @@ export default function RaceVisualizer() {
           for (const lt of laps) { cumTime += isFinite(lt) ? lt : 90; cumulativeTimes.push(cumTime); }
           const totalRaceTime = cumulativeTimes.length > 0 ? cumulativeTimes[cumulativeTimes.length - 1] : 0;
 
+          // If DNS driver somehow got lap data (formation lap?), still keep isDNS flag
+          // if they have no official laps completed per the results
+          const effectiveIsDNS = driver.isDNS || (laps.length === 0 && driver.lapsCompleted === 0 && !driver.finished);
+
           return {
             ...driver,
             laps, cumulativeTimes, totalRaceTime,
+            isDNS: effectiveIsDNS,
+            // Override status to DNS if the effective flag is set
+            status: effectiveIsDNS ? "DNS" : driver.status,
+            finished: effectiveIsDNS ? false : driver.finished,
           };
         });
 
@@ -443,15 +534,15 @@ export default function RaceVisualizer() {
 
         // Update driver states with loaded status
         const loaded: DriverPlaybackState[] = drivers.map((d) => {
-          // Keep DNS status for drivers who never started
-          const isDNSDriver = d.status === "DNS" || d.gridPosition === 0;
+          // Use the authoritative isDNS flag
           return {
             driverId: d.driverId, code: d.code, teamName: d.teamName, color: d.color,
-            position: isDNSDriver ? 0 : d.gridPosition,
+            position: d.isDNS ? 0 : d.gridPosition,
             lap: 0, trackProgress: 0, x: 0, y: 0,
             finished: false,
-            status: isDNSDriver ? "DNS" : (d.cumulativeTimes.length === 0 ? "No lap data" : "Ready"),
+            status: d.isDNS ? "DNS" : (d.cumulativeTimes.length === 0 ? "No lap data" : "Ready"),
             gapToLeader: "", gridPosition: d.gridPosition,
+            currentLapTime: null, previousLapTime: null, fastestLapTime: null,
           };
         });
         setDriverStates(loaded);
@@ -520,8 +611,8 @@ export default function RaceVisualizer() {
   const handleRandomRace = useCallback(() => {
     if (availableYears.length === 0) return;
     const pastYears = availableYears.filter((y) => y <= 2025);
-    const pool = pastYears.length > 0 ? pastYears : availableYears;
-    const ry = pool[Math.floor(Math.random() * pool.length)];
+    const yearPool = pastYears.length > 0 ? pastYears : availableYears;
+    const ry = yearPool[Math.floor(Math.random() * yearPool.length)];
     setIsPlaying(false);
     setRaceData(null);
     setCircuitGeoJSON(null);
@@ -532,6 +623,117 @@ export default function RaceVisualizer() {
   }, [availableYears]);
 
   const handleTrackReady = useCallback((track: ProjectedTrack) => { setProjectedTrack(track); }, []);
+
+  const handleToggleCars = useCallback(() => { setShowCars((prev) => !prev); }, []);
+
+  // ============================================================
+  // Speed options (shared with race-controls.tsx)
+  // ============================================================
+  const SPEED_OPTIONS = [0.5, 1, 2, 5, 10, 20, 50, 100];
+
+  // ============================================================
+  // Compute race events (retirements, fastest laps) for timeline
+  // ============================================================
+  const raceEvents = useMemo<RaceEvent[]>(() => {
+    if (!raceData) return [];
+    const events: RaceEvent[] = [];
+
+    // Retirement events: for each DNF driver, the event time is when their last lap ended
+    for (const driver of raceData.drivers) {
+      if (!driver.finished && !driver.isDNS && driver.cumulativeTimes.length > 0) {
+        const retirementTime = driver.cumulativeTimes[driver.cumulativeTimes.length - 1];
+        const rawStatus = driver.status !== "DNS" ? driver.status : "";
+        events.push({
+          type: "retirement",
+          time: retirementTime,
+          driverCode: driver.code,
+          description: `${driver.code} retired${rawStatus ? ` - ${rawStatus}` : ""}`,
+          lap: driver.cumulativeTimes.length,
+        });
+      }
+    }
+
+    // Fastest lap event: find the overall fastest lap across all drivers
+    let overallFastest = Infinity;
+    let fastestDriverCode = "";
+    let fastestLapIdx = 0;
+    for (const driver of raceData.drivers) {
+      if (driver.laps.length > 0 && !driver.isDNS) {
+        for (let i = 0; i < driver.laps.length; i++) {
+          if (driver.laps[i] < overallFastest) {
+            overallFastest = driver.laps[i];
+            fastestDriverCode = driver.code;
+            fastestLapIdx = i;
+          }
+        }
+      }
+    }
+    if (overallFastest < Infinity) {
+      const driver = raceData.drivers.find((d) => d.code === fastestDriverCode);
+      if (driver && fastestLapIdx < driver.cumulativeTimes.length) {
+        events.push({
+          type: "fastest_lap",
+          time: driver.cumulativeTimes[fastestLapIdx],
+          driverCode: fastestDriverCode,
+          description: `${fastestDriverCode} fastest lap`,
+          lap: fastestLapIdx + 1,
+        });
+      }
+    }
+
+    return events.sort((a, b) => a.time - b.time);
+  }, [raceData]);
+
+  // ============================================================
+  // Keyboard shortcuts
+  // ============================================================
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      // Don't handle shortcuts when typing in inputs/selects
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        e.target instanceof HTMLSelectElement
+      ) return;
+
+      switch (e.key) {
+        case " ":
+          e.preventDefault();
+          handlePlayPause();
+          break;
+        case "ArrowLeft":
+          e.preventDefault();
+          handleSeek(Math.max(0, timeRef.current - 5));
+          break;
+        case "ArrowRight":
+          e.preventDefault();
+          handleSeek(Math.min(raceDataRef.current?.maxRaceTime || 0, timeRef.current + 5));
+          break;
+        case "+":
+        case "=": {
+          e.preventDefault();
+          const curIdx = SPEED_OPTIONS.indexOf(speedRef.current);
+          if (curIdx < SPEED_OPTIONS.length - 1) setSpeedMultiplier(SPEED_OPTIONS[curIdx + 1]);
+          break;
+        }
+        case "-":
+        case "_": {
+          e.preventDefault();
+          const curIdx = SPEED_OPTIONS.indexOf(speedRef.current);
+          if (curIdx > 0) setSpeedMultiplier(SPEED_OPTIONS[curIdx - 1]);
+          break;
+        }
+        case "r":
+        case "R":
+          e.preventDefault();
+          handleReset();
+          break;
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [handlePlayPause, handleSeek, handleReset]);
 
   const maxTime = raceData?.maxRaceTime || 0;
 
@@ -618,6 +820,7 @@ export default function RaceVisualizer() {
                 totalLaps={raceData.totalLaps}
                 currentLap={currentLap}
                 isPlaying={isPlaying}
+                showCars={showCars}
                 onTrackReady={handleTrackReady}
               />
 
@@ -628,20 +831,57 @@ export default function RaceVisualizer() {
                 maxTime={maxTime}
                 currentLap={currentLap}
                 totalLaps={raceData.totalLaps}
+                showCars={showCars}
+                raceEvents={raceEvents}
                 onPlayPause={handlePlayPause}
                 onSpeedChange={handleSpeedChange}
                 onSeek={handleSeek}
                 onReset={handleReset}
+                onToggleCars={handleToggleCars}
               />
             </div>
 
-            <div className="h-[600px] lg:h-auto">
-              <Leaderboard
-                drivers={driverStates}
-                currentLap={currentLap}
-                totalLaps={raceData.totalLaps}
-                raceName={`${raceData.season} ${raceData.raceName}`}
-              />
+            <div className="h-[600px] lg:h-auto flex flex-col min-h-0">
+              {/* Tab toggle */}
+              <div className="flex shrink-0 mb-2 bg-zinc-900 rounded-lg border border-zinc-800 p-0.5">
+                <button
+                  onClick={() => setSideTab("standings")}
+                  className={`flex-1 py-1.5 text-[11px] font-medium rounded-md transition-colors ${
+                    sideTab === "standings"
+                      ? "bg-zinc-800 text-zinc-100"
+                      : "text-zinc-500 hover:text-zinc-300"
+                  }`}
+                >
+                  Standings
+                </button>
+                <button
+                  onClick={() => setSideTab("laptimes")}
+                  className={`flex-1 py-1.5 text-[11px] font-medium rounded-md transition-colors ${
+                    sideTab === "laptimes"
+                      ? "bg-zinc-800 text-zinc-100"
+                      : "text-zinc-500 hover:text-zinc-300"
+                  }`}
+                >
+                  Lap Times
+                </button>
+              </div>
+
+              {/* Tab content */}
+              <div className="flex-1 min-h-0">
+                {sideTab === "standings" ? (
+                  <Leaderboard
+                    drivers={driverStates}
+                    currentLap={currentLap}
+                    totalLaps={raceData.totalLaps}
+                    raceName={`${raceData.season} ${raceData.raceName}`}
+                  />
+                ) : (
+                  <LapTimes
+                    drivers={driverStates}
+                    raceName={`${raceData.season} ${raceData.raceName}`}
+                  />
+                )}
+              </div>
             </div>
           </div>
         )}
